@@ -1,143 +1,138 @@
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import React, { useMemo, useState } from 'react';
+import api, { errorMessage, formatMoney } from '../api';
 
-function Reporting({ accessToken, adAccounts }) {
+const leadsOf = (row) => Number(row.actions?.find(a => a.action_type === 'lead')?.value || 0);
+const costPerLeadOf = (row) => {
+  const leads = leadsOf(row);
+  return leads > 0 ? Number(row.spend || 0) / leads : 0;
+};
+
+const SORTERS = {
+  spend: (r) => Number(r.spend || 0),
+  leads: leadsOf,
+  cpc: (r) => Number(r.cpc || 0),
+  ctr: (r) => Number(r.ctr || 0),
+  cost_per_lead: costPerLeadOf,
+};
+
+const LEVEL_LABELS = { campaign: 'Campaign', adset: 'Ad Set', ad: 'Ad' };
+
+function Reporting({ businesses = [], adAccounts = [] }) {
   const [selectedBusiness, setSelectedBusiness] = useState('');
   const [selectedAdAccount, setSelectedAdAccount] = useState('');
-  const [businesses, setBusinesses] = useState([]);
   const [filteredAdAccounts, setFilteredAdAccounts] = useState([]);
   const [level, setLevel] = useState('campaign');
   const [datePreset, setDatePreset] = useState('last_30d');
-  const [insights, setInsights] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [loadedLevel, setLoadedLevel] = useState('campaign');
+  const [currency, setCurrency] = useState('');
   const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState('');
   const [sortBy, setSortBy] = useState('spend');
   const [sortOrder, setSortOrder] = useState('desc');
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [fetched, setFetched] = useState(false);
 
-  const sortInsights = (data) => {
-    return [...data].sort((a, b) => {
-      let aVal = 0;
-      let bVal = 0;
-
-      if (sortBy === 'spend') {
-        aVal = parseFloat(a.spend || 0);
-        bVal = parseFloat(b.spend || 0);
-      } else if (sortBy === 'leads') {
-        aVal = a.actions?.find(action => action.action_type === 'lead')?.value || 0;
-        bVal = b.actions?.find(action => action.action_type === 'lead')?.value || 0;
-      } else if (sortBy === 'cpc') {
-        aVal = parseFloat(a.cpc || 0);
-        bVal = parseFloat(b.cpc || 0);
-      } else if (sortBy === 'cost_per_lead') {
-        const leadsA = a.actions?.find(action => action.action_type === 'lead')?.value || 0;
-        const leadsB = b.actions?.find(action => action.action_type === 'lead')?.value || 0;
-        aVal = leadsA > 0 ? parseFloat(a.spend) / leadsA : 0;
-        bVal = leadsB > 0 ? parseFloat(b.spend) / leadsB : 0;
-      }
-
-      return sortOrder === 'asc' ? aVal - bVal : bVal - aVal;
-    });
-  };
-
-  useEffect(() => {
-    fetchBusinesses();
-  }, [accessToken]);
-
-  const fetchBusinesses = async () => {
-    if (!accessToken) return;
-    try {
-      const response = await axios.get('http://localhost:5000/api/auth/accounts', {
-        params: { accessToken }
-      });
-      setBusinesses(response.data.businesses || []);
-    } catch (error) {
-      console.error('Error fetching businesses:', error);
-    }
-  };
+  // Sorting is derived from current state, so changing the dropdowns always uses the new value.
+  const sortedRows = useMemo(() => {
+    const getValue = SORTERS[sortBy] || SORTERS.spend;
+    return [...rows].sort((a, b) => (sortOrder === 'asc' ? getValue(a) - getValue(b) : getValue(b) - getValue(a)));
+  }, [rows, sortBy, sortOrder]);
 
   const handleBusinessChange = async (businessId) => {
     setSelectedBusiness(businessId);
     setSelectedAdAccount('');
-    
-    if (businessId) {
-      try {
-        const response = await axios.get('http://localhost:5000/api/auth/business-accounts', {
-          params: { accessToken, businessId }
-        });
-        setFilteredAdAccounts(response.data.adAccounts);
-      } catch (error) {
-        alert('Error fetching business accounts: ' + error.message);
-      }
-    } else {
-      setFilteredAdAccounts(adAccounts);
+    setError('');
+    if (!businessId) return;
+    try {
+      const { data } = await api.get('/auth/business-accounts', { params: { businessId } });
+      setFilteredAdAccounts(data.adAccounts || []);
+    } catch (err) {
+      setError(`Error fetching business accounts: ${errorMessage(err)}`);
     }
   };
 
   const fetchStats = async () => {
     if (!selectedAdAccount) {
-      alert('Please select an ad account');
+      setError('Please select an ad account');
       return;
     }
-
     setLoading(true);
+    setError('');
+    setMessage('');
     try {
-      const response = await axios.get('http://localhost:5000/api/reporting/stats', {
-        params: {
-          accessToken,
-          adAccountId: selectedAdAccount,
-          level,
-          datePreset
-        }
+      const { data } = await api.get('/reporting/stats', {
+        params: { adAccountId: selectedAdAccount, level, datePreset },
       });
-      setInsights(sortInsights(response.data.insights));
-    } catch (error) {
-      alert('Error fetching stats: ' + error.message);
+      setRows(data.insights || []);
+      setCurrency(data.currency || '');
+      setLoadedLevel(data.level || level);
+      setFetched(true);
+    } catch (err) {
+      setError(`Error fetching stats: ${errorMessage(err)}`);
     }
     setLoading(false);
   };
 
-  const handlePause = async (entityId, entityType) => {
+  const setStatus = async (row, action) => {
+    const verb = action === 'pause' ? 'Pause' : 'Activate';
+    if (action === 'activate' && !window.confirm(`Activate "${row.name}"? It will start spending money.`)) return;
+    setBusyId(row.id);
+    setError('');
     try {
-      await axios.post('http://localhost:5000/api/reporting/pause', {
-        accessToken,
-        entityId,
-        entityType
-      });
-      alert(`${entityType} paused successfully`);
-      fetchStats();
-    } catch (error) {
-      alert('Error pausing: ' + error.message);
+      await api.post(`/reporting/${action}`, { entityId: row.id, entityType: loadedLevel });
+      setMessage(`${verb}d "${row.name}"`);
+      await fetchStats();
+    } catch (err) {
+      setError(`Could not ${verb.toLowerCase()}: ${errorMessage(err)}`);
     }
+    setBusyId('');
   };
 
-  const handleBudgetChange = async (entityId, entityType) => {
-    const newBudget = prompt('Enter new daily budget:');
-    if (!newBudget) return;
-
-    try {
-      await axios.post('http://localhost:5000/api/reporting/update-budget', {
-        accessToken,
-        entityId,
-        entityType,
-        budget: newBudget
-      });
-      alert('Budget updated successfully');
-      fetchStats();
-    } catch (error) {
-      alert('Error updating budget: ' + error.message);
+  const handleBudgetChange = async (row) => {
+    const label = row.budgetType === 'lifetime' ? 'lifetime' : 'daily';
+    const input = window.prompt(
+      `New ${label} budget for "${row.name}"${currency ? ` in ${currency}` : ''} (e.g. 500 or 750.50):`,
+      row.budget ?? '',
+    );
+    if (input === null || input.trim() === '') return;
+    const amount = Number(input);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError('Please enter a positive number for the budget');
+      return;
     }
+    setBusyId(row.id);
+    setError('');
+    try {
+      await api.post('/reporting/update-budget', {
+        adAccountId: selectedAdAccount,
+        entityId: row.id,
+        entityType: loadedLevel,
+        budget: amount,
+      });
+      setMessage(`Updated budget for "${row.name}" to ${formatMoney(amount, currency)}`);
+      await fetchStats();
+    } catch (err) {
+      setError(`Could not update budget: ${errorMessage(err)}`);
+    }
+    setBusyId('');
   };
+
+  const accountOptions = selectedBusiness ? filteredAdAccounts : adAccounts;
 
   return (
     <div className="page-container">
       <h1>Reporting</h1>
 
+      {error && <div className="notice notice-error">{error}</div>}
+      {message && <div className="notice notice-success">{message}</div>}
+
       <div className="form-group">
         <label>Select Business Manager</label>
         <select value={selectedBusiness} onChange={(e) => handleBusinessChange(e.target.value)}>
           <option value="">All Ad Accounts</option>
-          {businesses.map(business => (
-            <option key={business.id} value={business.id}>{business.name}</option>
-          ))}
+          {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
         </select>
       </div>
 
@@ -145,8 +140,8 @@ function Reporting({ accessToken, adAccounts }) {
         <label>Select Ad Account</label>
         <select value={selectedAdAccount} onChange={(e) => setSelectedAdAccount(e.target.value)}>
           <option value="">Select an ad account</option>
-          {(selectedBusiness ? filteredAdAccounts : adAccounts).map(account => (
-            <option key={account.id} value={account.id}>{account.name}</option>
+          {accountOptions.map(a => (
+            <option key={a.id} value={a.id}>{a.name}{a.currency ? ` (${a.currency})` : ''}</option>
           ))}
         </select>
       </div>
@@ -166,101 +161,112 @@ function Reporting({ accessToken, adAccounts }) {
           <option value="today">Today</option>
           <option value="yesterday">Yesterday</option>
           <option value="last_7d">Last 7 Days</option>
+          <option value="last_14d">Last 14 Days</option>
           <option value="last_30d">Last 30 Days</option>
-          <option value="lifetime">Lifetime</option>
+          <option value="this_month">This Month</option>
+          <option value="last_month">Last Month</option>
+          <option value="maximum">Lifetime</option>
         </select>
       </div>
 
       <div className="form-group">
         <label>Sort By</label>
-        <select value={sortBy} onChange={(e) => { setSortBy(e.target.value); setInsights(sortInsights(insights)); }}>
+        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
           <option value="spend">Spend</option>
           <option value="leads">Leads</option>
           <option value="cpc">CPC</option>
+          <option value="ctr">CTR</option>
           <option value="cost_per_lead">Cost Per Lead</option>
         </select>
       </div>
 
       <div className="form-group">
         <label>Sort Order</label>
-        <select value={sortOrder} onChange={(e) => { setSortOrder(e.target.value); setInsights(sortInsights(insights)); }}>
+        <select value={sortOrder} onChange={(e) => setSortOrder(e.target.value)}>
           <option value="desc">High to Low</option>
           <option value="asc">Low to High</option>
         </select>
       </div>
 
       <button onClick={fetchStats} className="btn btn-primary" disabled={loading}>
-        {loading ? 'Loading...' : 'Fetch Stats'}
+        {loading ? 'Loading…' : 'Fetch Stats'}
       </button>
 
-      {insights.length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>Campaign Name</th>
-              <th>Status</th>
-              <th>Spend</th>
-              <th>Leads</th>
-              <th>CPC</th>
-              <th>Cost Per Lead</th>
-              <th>Budget</th>
-              <th>Amount Spent</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {insights.map((insight, index) => {
-              const leads = insight.actions?.find(action => action.action_type === 'lead')?.value || 0;
-              const costPerLead = leads > 0 ? (parseFloat(insight.spend) / leads).toFixed(2) : '0.00';
-              
-              return (
-                <tr key={index}>
-                  <td>{insight.campaign_name || insight.adset_name || insight.ad_name}</td>
-                  <td>
-                    <span style={{ 
-                      padding: '4px 12px', 
-                      borderRadius: '12px', 
-                      fontSize: '11px',
-                      fontWeight: '600',
-                      background: insight.status === 'ACTIVE' ? 'rgba(74, 222, 128, 0.2)' : 'rgba(251, 191, 36, 0.2)',
-                      color: insight.status === 'ACTIVE' ? '#4ade80' : '#fbbf24'
-                    }}>
-                      {insight.status || 'PAUSED'}
-                    </span>
-                  </td>
-                  <td>${parseFloat(insight.spend || 0).toFixed(2)}</td>
-                  <td>{leads}</td>
-                  <td>${parseFloat(insight.cpc || 0).toFixed(2)}</td>
-                  <td>${costPerLead}</td>
-                  <td>${parseFloat(insight.budget || 0).toFixed(2)}</td>
-                  <td>${parseFloat(insight.spend || 0).toFixed(2)}</td>
-                  <td>
-                    <button 
-                      className="btn btn-danger" 
-                      onClick={() => handlePause(
-                        insight.campaign_id || insight.adset_id || insight.ad_id, 
-                        level
-                      )}
-                    >
-                      Pause
-                    </button>
-                    {level !== 'ad' && (
-                      <button 
-                        className="btn btn-secondary" 
-                        onClick={() => handleBudgetChange(
-                          insight.campaign_id || insight.adset_id, 
-                          level
-                        )}
+      {fetched && !loading && sortedRows.length === 0 && (
+        <p className="hint" style={{ marginTop: '20px' }}>No delivery in this date range.</p>
+      )}
+
+      {sortedRows.length > 0 && (
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>{LEVEL_LABELS[loadedLevel]} Name</th>
+                <th>Status</th>
+                <th>Spend</th>
+                <th>Impressions</th>
+                <th>Clicks</th>
+                <th>CTR</th>
+                <th>CPC</th>
+                <th>Leads</th>
+                <th>Cost Per Lead</th>
+                <th>Budget</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.map(row => {
+                const leads = leadsOf(row);
+                const isActive = row.status === 'ACTIVE';
+                const busy = busyId === row.id;
+                return (
+                  <tr key={row.id}>
+                    <td>{row.name}</td>
+                    <td>
+                      <span
+                        title={row.effectiveStatus && row.effectiveStatus !== row.status ? `Delivery: ${row.effectiveStatus}` : ''}
+                        style={{
+                          padding: '4px 12px',
+                          borderRadius: '12px',
+                          fontSize: '11px',
+                          fontWeight: '600',
+                          background: isActive ? 'rgba(74, 222, 128, 0.2)' : 'rgba(251, 191, 36, 0.2)',
+                          color: isActive ? '#4ade80' : '#fbbf24',
+                        }}
                       >
-                        Change Budget
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                        {row.status}
+                      </span>
+                    </td>
+                    <td>{formatMoney(row.spend, currency)}</td>
+                    <td>{Number(row.impressions || 0).toLocaleString()}</td>
+                    <td>{Number(row.clicks || 0).toLocaleString()}</td>
+                    <td>{Number(row.ctr || 0).toFixed(2)}%</td>
+                    <td>{formatMoney(row.cpc, currency)}</td>
+                    <td>{leads}</td>
+                    <td>{leads > 0 ? formatMoney(costPerLeadOf(row), currency) : '—'}</td>
+                    <td>
+                      {row.budget
+                        ? `${formatMoney(row.budget, currency)}${row.budgetType === 'lifetime' ? ' lifetime' : '/day'}`
+                        : <span className="hint">{loadedLevel === 'ad' ? '—' : 'Set at other level'}</span>}
+                    </td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      {isActive ? (
+                        <button className="btn btn-danger" disabled={busy} onClick={() => setStatus(row, 'pause')}>Pause</button>
+                      ) : (
+                        <button className="btn btn-primary" disabled={busy} onClick={() => setStatus(row, 'activate')}>Activate</button>
+                      )}
+                      {loadedLevel !== 'ad' && row.budget && (
+                        <button className="btn btn-secondary" disabled={busy} onClick={() => handleBudgetChange(row)}>
+                          Change Budget
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

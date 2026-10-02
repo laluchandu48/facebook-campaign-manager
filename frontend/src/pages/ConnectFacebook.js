@@ -1,170 +1,153 @@
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import React, { useEffect, useState } from 'react';
+import api, { API_URL, errorMessage } from '../api';
 
-function ConnectFacebook({ setAccessToken, setBusinesses, setAdAccounts, setPages, businesses, adAccounts, pages }) {
+function ConnectFacebook({
+  connected, checking, user, businesses, adAccounts, pages, accountsError, onConnected, onLogout,
+}) {
   const [token, setToken] = useState('');
-  const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
+  // The Facebook Login popup (served by the backend) reports back with postMessage.
   useEffect(() => {
-    checkSession();
-  }, []);
-
-  const checkSession = async () => {
-    try {
-      const response = await axios.get('http://localhost:5000/api/auth/session', {
-        withCredentials: true
-      });
-      
-      if (response.data.authenticated) {
-        setAccessToken(response.data.accessToken);
-        fetchAccounts(response.data.accessToken);
-        setConnected(true);
+    const backendOrigin = new URL(API_URL).origin;
+    const onMessage = (event) => {
+      if (event.origin !== backendOrigin) return;
+      if (event.data?.type === 'FB_AUTH_SUCCESS') {
+        setError('');
+        onConnected();
+      } else if (event.data?.type === 'FB_AUTH_ERROR') {
+        setError('Facebook login failed or was cancelled. Please try again.');
       }
-    } catch (error) {
-      console.error('Session check failed:', error);
+      setLoading(false);
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [onConnected]);
+
+  const handleFacebookLogin = async () => {
+    setError('');
+    setLoading(true);
+    try {
+      const { data } = await api.get('/auth/facebook/login');
+      const popup = window.open(data.authUrl, 'fb-login', 'width=600,height=700');
+      if (!popup) {
+        setError('The login popup was blocked. Allow popups for this site and try again.');
+        setLoading(false);
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+      setLoading(false);
     }
   };
 
-  const handleConnect = async () => {
-    if (!token) {
-      alert('Please enter an access token');
+  const handleConnectWithToken = async () => {
+    if (!token.trim()) {
+      setError('Please paste an access token');
       return;
     }
-
+    setError('');
     setLoading(true);
     try {
-      // Save to backend session
-      await axios.post('http://localhost:5000/api/auth/save-token', 
-        { accessToken: token },
-        { withCredentials: true }
-      );
-      
-      setAccessToken(token);
-      await fetchAccounts(token);
-      setConnected(true);
-    } catch (error) {
-      alert('Error connecting: ' + error.message);
+      await api.post('/auth/save-token', { accessToken: token.trim() });
+      setToken('');
+      await onConnected();
+    } catch (err) {
+      setError(`Could not connect: ${errorMessage(err)}`);
     }
     setLoading(false);
   };
 
-  const handleLogout = async () => {
-    try {
-      await axios.post('http://localhost:5000/api/auth/logout', {}, {
-        withCredentials: true
-      });
-      setAccessToken('');
-      setBusinesses([]);
-      setAdAccounts([]);
-      setPages([]);
-      setToken('');
-      setConnected(false);
-    } catch (error) {
-      alert('Error logging out: ' + error.message);
-    }
-  };
-
-  const fetchAccounts = async (accessToken) => {
-    try {
-      const response = await axios.get('http://localhost:5000/api/auth/accounts', {
-        params: { accessToken }
-      });
-
-      setBusinesses(response.data.businesses || []);
-      setAdAccounts(response.data.adAccounts);
-      setPages(response.data.pages);
-    } catch (error) {
-      alert('Error fetching accounts: ' + error.message);
-    }
-  };
+  if (checking) {
+    return <div className="page-container"><h1>Connect Facebook</h1><p>Checking connection…</p></div>;
+  }
 
   return (
     <div className="page-container">
       <h1>Connect Facebook</h1>
 
+      {error && <div className="notice notice-error">{error}</div>}
+      {accountsError && <div className="notice notice-error">{accountsError}</div>}
+
       {!connected ? (
         <div>
-          <div style={{ background: '#f7fafc', padding: '30px', borderRadius: '12px', marginBottom: '30px' }}>
-            <h3 style={{ marginTop: 0, color: '#2d3748' }}>How to get your Access Token:</h3>
-            <ol style={{ color: '#4a5568', lineHeight: '1.8' }}>
-              <li>Go to <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer" style={{ color: '#667eea', fontWeight: 600 }}>Facebook Graph API Explorer</a></li>
+          <div className="info-box">
+            <h3>Option 1: Log in with Facebook</h3>
+            <p>Recommended. Requires FB_APP_ID, FB_APP_SECRET and BACKEND_URL in the backend .env, and
+              <code>{` ${API_URL}/api/auth/facebook/callback `}</code>
+              added as a Valid OAuth Redirect URI in your Facebook app.</p>
+            <button onClick={handleFacebookLogin} className="btn btn-primary" disabled={loading}>
+              {loading ? 'Waiting for Facebook…' : 'Log in with Facebook'}
+            </button>
+          </div>
+
+          <div className="info-box">
+            <h3>Option 2: Paste an access token</h3>
+            <ol>
+              <li>Go to the <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer">Graph API Explorer</a></li>
               <li>Select your app from the dropdown</li>
-              <li>Click "Generate Access Token"</li>
-              <li>Grant permissions: <code style={{ background: '#e2e8f0', padding: '2px 6px', borderRadius: '4px' }}>ads_management, ads_read, business_management, pages_read_engagement</code></li>
-              <li>Copy the access token and paste it below</li>
+              <li>Add permissions: <code>ads_management, ads_read, business_management, pages_read_engagement, pages_show_list</code></li>
+              <li>Click "Generate Access Token", then copy it and paste it below</li>
             </ol>
+            <p className="hint">The token is stored only on the server. If the backend has your app ID and secret, it is
+              automatically exchanged for a long-lived (about 60 day) token.</p>
           </div>
 
           <div className="form-group">
             <label>Facebook Access Token</label>
-            <textarea 
+            <textarea
               value={token}
               onChange={(e) => setToken(e.target.value)}
               placeholder="Paste your Facebook access token here"
               rows="4"
               style={{ fontFamily: 'monospace', fontSize: '13px' }}
+              autoComplete="off"
             />
           </div>
 
-          <button 
-            onClick={handleConnect} 
-            className="btn btn-primary"
-            disabled={loading}
-          >
-            {loading ? 'Connecting...' : 'Connect'}
+          <button onClick={handleConnectWithToken} className="btn btn-primary" disabled={loading}>
+            {loading ? 'Connecting…' : 'Connect'}
           </button>
         </div>
       ) : (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
-            <h2 style={{ margin: 0, color: '#48bb78' }}>✓ Connected Successfully!</h2>
-            <button onClick={handleLogout} className="btn btn-secondary">
-              Logout
-            </button>
+            <h2 style={{ margin: 0, color: '#48bb78' }}>✓ Connected{user?.name ? ` as ${user.name}` : ''}</h2>
+            <div>
+              <button onClick={onConnected} className="btn btn-secondary">Refresh</button>
+              <button onClick={onLogout} className="btn btn-secondary">Logout</button>
+            </div>
           </div>
 
           <h3>Business Managers</h3>
           <div className="account-list">
-            {businesses.length > 0 ? (
-              businesses.map(business => (
-                <div key={business.id} className="account-item">
-                  <strong>{business.name}</strong>
-                  <p>ID: {business.id}</p>
-                </div>
-              ))
-            ) : (
-              <p>No business managers found</p>
-            )}
+            {businesses.length > 0 ? businesses.map(business => (
+              <div key={business.id} className="account-item">
+                <strong>{business.name}</strong>
+                <p>ID: {business.id}</p>
+              </div>
+            )) : <p>No business managers found</p>}
           </div>
 
           <h3>Ad Accounts</h3>
           <div className="account-list">
-            {adAccounts.length > 0 ? (
-              adAccounts.map(account => (
-                <div key={account.id} className="account-item">
-                  <strong>{account.name}</strong>
-                  <p>ID: {account.id}</p>
-                  <p>Status: {account.account_status}</p>
-                </div>
-              ))
-            ) : (
-              <p>No ad accounts found</p>
-            )}
+            {adAccounts.length > 0 ? adAccounts.map(account => (
+              <div key={account.id} className="account-item">
+                <strong>{account.name}</strong>
+                <p>ID: {account.id}</p>
+                <p>Status: {account.account_status === 1 ? 'Active' : account.account_status}{account.currency ? ` · ${account.currency}` : ''}</p>
+              </div>
+            )) : <p>No ad accounts found</p>}
           </div>
 
           <h3>Pages</h3>
           <div className="account-list">
-            {pages.length > 0 ? (
-              pages.map(page => (
-                <div key={page.id} className="account-item">
-                  <strong>{page.name}</strong>
-                  <p>ID: {page.id}</p>
-                </div>
-              ))
-            ) : (
-              <p>No pages found</p>
-            )}
+            {pages.length > 0 ? pages.map(page => (
+              <div key={page.id} className="account-item">
+                <strong>{page.name}</strong>
+                <p>ID: {page.id}</p>
+              </div>
+            )) : <p>No pages found</p>}
           </div>
         </div>
       )}
