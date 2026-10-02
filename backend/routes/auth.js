@@ -1,179 +1,188 @@
 const express = require('express');
-const router = express.Router();
-const axios = require('axios');
 const crypto = require('crypto');
-const bizSdk = require('facebook-nodejs-business-sdk');
+const axios = require('axios');
+const router = express.Router();
+const requireAuth = require('../middleware/requireAuth');
+const {
+  bizSdk, apiFor, obj, fetchAll, sendError, fbErrorMessage, normalizeAdAccountId,
+} = require('../lib/facebook');
 
-const AdAccount = bizSdk.AdAccount;
-const Page = bizSdk.Page;
-const Business = bizSdk.Business;
+const { AdAccount, Business, User, FacebookAdsApi } = bizSdk;
+const GRAPH = `https://graph.facebook.com/${FacebookAdsApi.VERSION}`;
+const SCOPES = 'ads_management,ads_read,business_management,pages_read_engagement,pages_show_list';
 
-// Facebook OAuth login
+/**
+ * Swap a short-lived token (about 1-2 hours) for a long-lived one (about 60 days).
+ * Needs FB_APP_ID and FB_APP_SECRET. If anything fails, keep the original token.
+ */
+async function exchangeForLongLivedToken(shortToken) {
+  if (!process.env.FB_APP_ID || !process.env.FB_APP_SECRET) return shortToken;
+  try {
+    const { data } = await axios.get(`${GRAPH}/oauth/access_token`, {
+      params: {
+        grant_type: 'fb_exchange_token',
+        client_id: process.env.FB_APP_ID,
+        client_secret: process.env.FB_APP_SECRET,
+        fb_exchange_token: shortToken,
+      },
+    });
+    return data.access_token || shortToken;
+  } catch (error) {
+    console.warn('Could not exchange for a long-lived token:', error.response?.data?.error?.message || error.message);
+    return shortToken;
+  }
+}
+
+function saveSession(req) {
+  return new Promise((resolve, reject) => req.session.save(err => (err ? reject(err) : resolve())));
+}
+
+function regenerateSession(req) {
+  return new Promise((resolve, reject) => req.session.regenerate(err => (err ? reject(err) : resolve())));
+}
+
+/** Store a token in a fresh session after confirming it actually works. */
+async function startSession(req, token) {
+  const me = await obj(User, 'me', apiFor(token)).read(['id', 'name']);
+  const longLived = await exchangeForLongLivedToken(token);
+  await regenerateSession(req); // prevents session fixation
+  req.session.accessToken = longLived;
+  req.session.user = { id: me.id, name: me.name };
+  await saveSession(req);
+  return req.session.user;
+}
+
+// ---- Facebook Login (OAuth) ----
+
 router.get('/facebook/login', (req, res) => {
-  const fbAuthUrl = `https://www.facebook.com/v18.0/dialog/oauth?` +
-    `client_id=${process.env.FB_APP_ID}` +
-    `&redirect_uri=${process.env.BACKEND_URL}/api/auth/facebook/callback` +
-    `&scope=ads_management,ads_read,business_management,pages_read_engagement` +
-    `&state=${Math.random().toString(36).substring(7)}`;
-  
-  res.json({ authUrl: fbAuthUrl });
+  if (!process.env.FB_APP_ID || !process.env.BACKEND_URL) {
+    return res.status(500).json({ error: 'FB_APP_ID and BACKEND_URL must be set in backend/.env' });
+  }
+  const state = crypto.randomBytes(16).toString('hex');
+  req.session.oauthState = state;
+  req.session.save(err => {
+    if (err) return res.status(500).json({ error: 'Failed to start login' });
+    const params = new URLSearchParams({
+      client_id: process.env.FB_APP_ID,
+      redirect_uri: `${process.env.BACKEND_URL}/api/auth/facebook/callback`,
+      scope: SCOPES,
+      state,
+    });
+    res.json({ authUrl: `https://www.facebook.com/${FacebookAdsApi.VERSION}/dialog/oauth?${params}` });
+  });
 });
 
-// Facebook OAuth callback
+function popupResponse(res, type) {
+  const origin = JSON.stringify(process.env.FRONTEND_URL || 'http://localhost:3000');
+  res.set('Content-Security-Policy', "script-src 'unsafe-inline'");
+  res.send(`<!doctype html><html><body>
+    <p>${type === 'FB_AUTH_SUCCESS' ? 'Connected! You can close this window.' : 'Login failed. You can close this window.'}</p>
+    <script>
+      if (window.opener) { window.opener.postMessage({ type: '${type}' }, ${origin}); }
+      window.close();
+    </script>
+  </body></html>`);
+}
+
 router.get('/facebook/callback', async (req, res) => {
-  const { code } = req.query;
-  
-  if (!code) {
-    return res.redirect(`${process.env.FRONTEND_URL}/connect-facebook?error=no_code`);
+  const { code, state } = req.query;
+  const expectedState = req.session.oauthState;
+  delete req.session.oauthState;
+
+  if (!code || !state || !expectedState || state !== expectedState) {
+    return popupResponse(res, 'FB_AUTH_ERROR');
   }
-  
+
   try {
-    // Exchange code for access token
-    const tokenResponse = await axios.get('https://graph.facebook.com/v18.0/oauth/access_token', {
+    const { data } = await axios.get(`${GRAPH}/oauth/access_token`, {
       params: {
         client_id: process.env.FB_APP_ID,
         client_secret: process.env.FB_APP_SECRET,
         redirect_uri: `${process.env.BACKEND_URL}/api/auth/facebook/callback`,
-        code: code
-      }
+        code,
+      },
     });
-
-    const accessToken = tokenResponse.data.access_token;
-    
-    // Store in session
-    req.session.accessToken = accessToken;
-    req.session.save((err) => {
-      if (err) {
-        return res.redirect(`${process.env.FRONTEND_URL}/connect-facebook?error=session`);
-      }
-      // Redirect back to frontend
-      res.send(`
-        <html>
-          <body>
-            <script>
-              window.opener.postMessage({ type: 'FB_AUTH_SUCCESS' }, '${process.env.FRONTEND_URL}');
-              window.close();
-            </script>
-            <p>Authentication successful! You can close this window.</p>
-          </body>
-        </html>
-      `);
-    });
+    await startSession(req, data.access_token);
+    popupResponse(res, 'FB_AUTH_SUCCESS');
   } catch (error) {
-    console.error('OAuth error:', error.response?.data || error.message);
-    res.send(`
-      <html>
-        <body>
-          <script>
-            window.opener.postMessage({ type: 'FB_AUTH_ERROR' }, '${process.env.FRONTEND_URL}');
-            window.close();
-          </script>
-          <p>Authentication failed. You can close this window.</p>
-        </body>
-      </html>
-    `);
+    console.error('OAuth error:', error.response?.data?.error?.message || fbErrorMessage(error));
+    popupResponse(res, 'FB_AUTH_ERROR');
   }
 });
 
-// Get session access token
+// ---- Manual token (pasted from Graph API Explorer) ----
+
+router.post('/save-token', async (req, res) => {
+  const { accessToken } = req.body || {};
+  if (!accessToken || typeof accessToken !== 'string') {
+    return res.status(400).json({ error: 'accessToken is required' });
+  }
+  try {
+    const user = await startSession(req, accessToken.trim());
+    res.json({ success: true, user });
+  } catch (error) {
+    sendError(res, error, 400);
+  }
+});
+
+// ---- Session ----
+
+// Tells the frontend whether it is connected. Never returns the token itself.
 router.get('/session', (req, res) => {
-  if (req.session.accessToken) {
-    res.json({ accessToken: req.session.accessToken, authenticated: true });
-  } else {
-    res.json({ authenticated: false });
-  }
+  res.json({
+    authenticated: Boolean(req.session.accessToken),
+    user: req.session.user || null,
+  });
 });
 
-// Logout
 router.post('/logout', (req, res) => {
-  req.session.destroy();
-  res.json({ success: true });
-});
-
-// Save token to session
-router.post('/save-token', (req, res) => {
-  const { accessToken } = req.body;
-  req.session.accessToken = accessToken;
-  req.session.save((err) => {
-    if (err) {
-      return res.status(500).json({ error: 'Failed to save session' });
-    }
+  req.session.destroy(() => {
+    res.clearCookie('fbcm.sid');
     res.json({ success: true });
   });
 });
 
-router.post('/connect', async (req, res) => {
-  try {
-    const { accessToken } = req.body;
-    
-    bizSdk.FacebookAdsApi.init(accessToken);
-    const api = bizSdk.FacebookAdsApi.init(accessToken);
+// ---- Accounts ----
 
-    res.json({ success: true, message: 'Connected successfully' });
+router.get('/accounts', requireAuth, async (req, res) => {
+  try {
+    const me = obj(User, 'me', req.fbApi);
+    const [businesses, adAccounts, pages] = await Promise.all([
+      me.getBusinesses(['id', 'name'], { limit: 100 }).then(c => fetchAll(c)),
+      me.getAdAccounts(['id', 'name', 'account_status', 'currency', 'business'], { limit: 100 }).then(c => fetchAll(c)),
+      // Note: page access tokens are deliberately NOT requested or sent to the browser.
+      me.getAccounts(['id', 'name'], { limit: 100 }).then(c => fetchAll(c)),
+    ]);
+    res.json({ businesses, adAccounts, pages });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
-router.get('/accounts', async (req, res) => {
+router.get('/business-accounts', requireAuth, async (req, res) => {
   try {
-    const { accessToken } = req.query;
-    
-    if (!accessToken) {
-      return res.status(400).json({ error: 'Access token is required' });
-    }
-    
-    // Initialize API with app secret
-    bizSdk.FacebookAdsApi.init(accessToken, process.env.FB_APP_SECRET);
-    
-    const account = new bizSdk.User('me');
-    const businesses = await account.getBusinesses(['id', 'name']);
-    const adAccounts = await account.getAdAccounts(['id', 'name', 'account_status', 'business']);
-    const pages = await account.getAccounts(['id', 'name', 'access_token']);
-
-    res.json({
-      businesses: businesses,
-      adAccounts: adAccounts,
-      pages: pages
-    });
+    const { businessId } = req.query;
+    if (!businessId) return res.status(400).json({ error: 'businessId is required' });
+    const business = obj(Business, businessId, req.fbApi);
+    const fields = ['id', 'name', 'account_status', 'currency'];
+    const [owned, client] = await Promise.all([
+      business.getOwnedAdAccounts(fields, { limit: 100 }).then(c => fetchAll(c)),
+      business.getClientAdAccounts(fields, { limit: 100 }).then(c => fetchAll(c)).catch(() => []),
+    ]);
+    const byId = new Map([...owned, ...client].map(a => [a.id, a]));
+    res.json({ adAccounts: [...byId.values()] });
   } catch (error) {
-    console.error('Error fetching accounts:', error.message);
-    console.error('Error details:', error.response?.data || error);
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
-router.get('/business-accounts', async (req, res) => {
+router.get('/pixels', requireAuth, async (req, res) => {
   try {
-    const { accessToken, businessId } = req.query;
-    
-    bizSdk.FacebookAdsApi.init(accessToken);
-    
-    const business = new Business(businessId);
-    const adAccounts = await business.getOwnedAdAccounts(['id', 'name', 'account_status']);
-
-    res.json({
-      adAccounts: adAccounts
-    });
+    const account = obj(AdAccount, normalizeAdAccountId(req.query.adAccountId), req.fbApi);
+    const pixels = await fetchAll(await account.getAdsPixels(['id', 'name'], { limit: 100 }));
+    res.json({ pixels });
   } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-router.get('/pixels', async (req, res) => {
-  try {
-    const { accessToken, adAccountId } = req.query;
-    
-    bizSdk.FacebookAdsApi.init(accessToken);
-    
-    const account = new AdAccount(adAccountId);
-    const pixels = await account.getAdsPixels(['id', 'name']);
-
-    res.json({
-      pixels: pixels
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    sendError(res, error);
   }
 });
 
