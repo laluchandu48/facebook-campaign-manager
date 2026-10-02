@@ -1,83 +1,27 @@
-# Security Features
+# Security
 
-## Implemented Security Measures
+## What is implemented
 
-### Backend Security
+- **Server-side token storage.** The Facebook access token lives only in the server session. It is never returned to the browser, stored in browser storage, or sent in a URL.
+- **Session cookies** are `httpOnly`, `secure` in production, and regenerated on login to prevent session fixation.
+- **OAuth `state` check** on the Facebook Login callback to block cross-site request forgery.
+- **Per-request API clients.** Each request uses its own Graph API client, so concurrent users never share a token.
+- **Helmet** security headers, **CORS** limited to `FRONTEND_URL`, and **rate limiting** (300 requests per 15 minutes per IP).
+- **Input validation** on campaign creation, status changes and budget changes.
+- **Error logging without secrets.** Raw SDK errors (which include the token in the request URL) are not logged.
+- **Page access tokens** are not requested or exposed.
 
-1. **Helmet.js** - Sets secure HTTP headers
-   - XSS Protection
-   - Content Security Policy
-   - HSTS (HTTP Strict Transport Security)
-   - Frame protection
+## Not yet implemented (needed before giving access to clients)
 
-2. **Rate Limiting** - Prevents abuse
-   - 100 requests per 15 minutes per IP
-   - Protects against DDoS attacks
+- **User accounts.** Anyone who can reach the app can connect their own Facebook token, but there is no login of its own, no roles, and no per-client restriction of ad accounts.
+- **Persistent session store.** Sessions are in memory; use Redis or a database in production.
+- **Audit log** of who changed which campaign and budget.
+- **CSRF tokens** for state-changing requests if the frontend and backend are served from different sites with `COOKIE_SAMESITE=none`.
+- **appsecret_proof** on Graph API calls.
 
-3. **CORS** - Controlled cross-origin requests
-   - Only allows requests from frontend URL
-   - Credentials support enabled
+## Production checklist
 
-4. **Input Validation** - Prevents injection attacks
-   - JSON payload size limited to 10MB
-   - Express validator ready for implementation
-
-5. **Environment Variables** - Sensitive data protection
-   - API keys stored in .env file
-   - Never committed to version control
-
-### Frontend Security
-
-1. **No Sensitive Data Storage** - Access tokens handled securely
-2. **HTTPS Ready** - Production deployment should use SSL/TLS
-
-## Additional Recommendations for Production
-
-1. **Authentication System**
-   - Implement JWT-based authentication
-   - Add user login/registration
-   - Role-based access control (Admin, Client, Viewer)
-
-2. **Database**
-   - Store user credentials securely (bcrypt)
-   - Log all campaign activities
-   - Audit trail for compliance
-
-3. **API Security**
-   - Implement API key rotation
-   - Use OAuth 2.0 for Facebook authentication
-   - Encrypt access tokens at rest
-
-4. **Monitoring**
-   - Log all API requests
-   - Set up error tracking (Sentry)
-   - Monitor for suspicious activity
-
-5. **Deployment**
-   - Use HTTPS only
-   - Enable firewall rules
-   - Regular security updates
-   - Backup strategy
-
-## Client Access Control
-
-For sharing with clients:
-
-1. Create separate user accounts per client
-2. Limit access to only their ad accounts
-3. Set up read-only access for reporting
-4. Implement session timeouts
-5. Two-factor authentication (2FA)
-
-## Environment Variables
-
-Required for production:
-
-```
-PORT=5000
-JWT_SECRET=<strong-random-string>
-SESSION_SECRET=<strong-random-string>
-NODE_ENV=production
-FRONTEND_URL=https://your-domain.com
-DATABASE_URL=<your-database-url>
-```
+- Serve both frontend and backend over HTTPS
+- Set `NODE_ENV=production`, a strong `SESSION_SECRET`, and correct `FRONTEND_URL` / `BACKEND_URL`
+- Keep `.env` out of version control (already in `.gitignore`)
+- Run `npm audit` and update dependencies regularly

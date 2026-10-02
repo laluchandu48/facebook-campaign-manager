@@ -1,122 +1,122 @@
 # Facebook Campaign Manager
 
-A web application to create, launch, and optimize Facebook ad campaigns in one place.
+A web application to create, launch, and manage Facebook (Meta) ad campaigns in one place.
 
 ## Features
 
-1. **Create Campaign** - Multi-step campaign creation workflow
-   - Campaign details (name, objective, budget, bid strategy)
-   - Ad Set configuration (targeting, demographics, placements, schedule)
-   - Ad creation (creative, message, link)
-   - Ad account selection
+1. **Create Campaign**: a three-step workflow that builds a campaign, ad set, creative and ad in one go.
+   - Campaign: name, objective, campaign-level or ad set-level budget, bid strategy
+   - Ad set: countries, age, gender, pixel and conversion event, bid/cost cap, schedule
+   - Ad: page, copy, call-to-action, and image or video upload (sent straight to your ad account)
+   - Everything is created **paused**. If any step fails, the partly built campaign is deleted automatically.
 
-2. **Reporting** - View campaign statistics and manage campaigns
-   - View all Facebook ad metrics (impressions, clicks, spend, CTR, CPC, CPM, etc.)
-   - Pause campaigns, ad sets, and ads
-   - Change budgets for campaigns and ad sets
-   - Filter by date range and level (campaign/adset/ad)
+2. **Reporting**: campaign, ad set or ad level stats (spend, impressions, clicks, CTR, CPC, leads, cost per lead)
+   - Pause or activate items
+   - Change daily or lifetime budgets, entered in normal currency amounts
+   - Amounts are shown in the ad account's own currency
 
-3. **Connect Facebook** - Facebook account integration
-   - Connect using Facebook access token
-   - View all accessible ad accounts
-   - View all accessible pages
+3. **Connect Facebook**: Facebook Login, or paste a token from the Graph API Explorer.
+   The token is kept only in the server session and is never sent back to the browser.
 
-## Setup Instructions
+## Setup
 
 ### Prerequisites
-- Node.js (v14 or higher)
-- Facebook Developer Account
-- Facebook App with Marketing API access
 
-### Backend Setup
+- Node.js 20 or newer
+- A Facebook app with the Marketing API product added
 
-1. Navigate to backend directory:
-```bash
+### Backend
+
+```
 cd backend
-```
-
-2. Install dependencies:
-```bash
 npm install
+cp .env.example .env      # on Windows: copy .env.example .env
 ```
 
-3. Create `.env` file:
-```bash
-copy .env.example .env
-```
+Edit `backend/.env`:
 
-4. Update `.env` with your Facebook credentials:
 ```
-PORT=5000
 FB_APP_ID=your_facebook_app_id
 FB_APP_SECRET=your_facebook_app_secret
-FB_ACCESS_TOKEN=your_access_token
+SESSION_SECRET=a_long_random_string
+FRONTEND_URL=http://localhost:3000
+BACKEND_URL=http://localhost:5000
 ```
 
-5. Start the backend server:
-```bash
+Generate a session secret with:
+
+```
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+Then start it:
+
+```
 npm start
 ```
 
-### Frontend Setup
+### Frontend
 
-1. Navigate to frontend directory:
-```bash
+```
 cd frontend
-```
-
-2. Install dependencies:
-```bash
 npm install
-```
-
-3. Start the development server:
-```bash
 npm start
 ```
 
-The application will open at `http://localhost:3000`
+The app opens at `http://localhost:3000`. To use a different backend address, copy
+`frontend/.env.example` to `frontend/.env` and set `REACT_APP_API_URL`.
 
-## Getting Facebook Access Token
+### Facebook Login (optional but recommended)
 
-1. Go to [Facebook Graph API Explorer](https://developers.facebook.com/tools/explorer/)
+In your Facebook app, under Facebook Login → Settings, add this Valid OAuth Redirect URI:
+
+```
+http://localhost:5000/api/auth/facebook/callback
+```
+
+### Using a pasted token instead
+
+1. Open the [Graph API Explorer](https://developers.facebook.com/tools/explorer/)
 2. Select your app
-3. Add required permissions:
-   - ads_management
-   - ads_read
-   - business_management
-   - pages_read_engagement
-4. Generate Access Token
-5. Use this token in the "Connect Facebook" page
+3. Add permissions: `ads_management`, `ads_read`, `business_management`, `pages_read_engagement`, `pages_show_list`
+4. Generate the token and paste it on the Connect Facebook page
+
+If `FB_APP_ID` and `FB_APP_SECRET` are set, the backend exchanges it for a long-lived (about 60 day) token.
 
 ## API Endpoints
 
-### Auth Routes
-- `POST /api/auth/connect` - Connect to Facebook
-- `GET /api/auth/accounts` - Get ad accounts and pages
+All endpoints except login/session require a connected session (cookie). No endpoint accepts an access token in the URL.
 
-### Campaign Routes
-- `POST /api/campaigns/create` - Create campaign with ad set and ad
+### Auth
+- `GET  /api/auth/facebook/login`: start Facebook Login
+- `GET  /api/auth/facebook/callback`: OAuth redirect target
+- `POST /api/auth/save-token`: connect with a pasted token `{ accessToken }`
+- `GET  /api/auth/session`: `{ authenticated, user }`
+- `POST /api/auth/logout`
+- `GET  /api/auth/accounts`: businesses, ad accounts, pages
+- `GET  /api/auth/business-accounts?businessId=`
+- `GET  /api/auth/pixels?adAccountId=`
 
-### Reporting Routes
-- `GET /api/reporting/stats` - Get campaign statistics
-- `POST /api/reporting/pause` - Pause campaign/adset/ad
-- `POST /api/reporting/update-budget` - Update budget
+### Campaigns
+- `POST /api/campaigns/create`: campaign + ad set + creative + ad
+- `POST /api/campaigns/upload-image`: `{ adAccountId, dataBase64 }` → `{ imageHash }`
+- `POST /api/campaigns/upload-video`: multipart `adAccountId`, `video` → `{ videoId }`
+- `GET  /api/campaigns/video-status/:videoId`
 
-## Tech Stack
-
-**Backend:**
-- Node.js
-- Express
-- Facebook Business SDK
-
-**Frontend:**
-- React
-- React Router
-- Axios
+### Reporting
+- `GET  /api/reporting/stats?adAccountId=&level=&datePreset=`
+- `POST /api/reporting/pause`: `{ entityId, entityType }`
+- `POST /api/reporting/activate`: `{ entityId, entityType }`
+- `POST /api/reporting/update-budget`: `{ adAccountId, entityId, entityType, budget }`
 
 ## Notes
 
-- All campaigns, ad sets, and ads are created in PAUSED status by default
-- Make sure your Facebook app has proper permissions for Marketing API
-- Access tokens expire - you may need to regenerate them periodically
+- Budgets and bids are typed in normal amounts (500 = 500.00) and converted to Meta's minor units on the server, using the ad account's currency.
+- Uses Graph API v24.0 via `facebook-nodejs-business-sdk` 24.x. Meta retires API versions roughly two years after release, so update the SDK periodically.
+- Sessions are stored in memory, so restarting the backend logs everyone out. Use a persistent session store (Redis, a database) for production.
+
+## Tech Stack
+
+**Backend:** Node.js, Express, Facebook Business SDK, express-session, helmet, multer
+
+**Frontend:** React, React Router, Axios
